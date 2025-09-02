@@ -1,125 +1,110 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-import matplotlib.pyplot as plt
 import plotly.express as px
 
-# --- Data Preprocessing ---
+# 1. Dataset loading and preprocessing
 @st.cache_data
-def load_data(uploaded_file):
-    # Efficient reading; only needed columns
-    dtypes = {
-        'id': np.int32,
-        'time': np.float32,
-        'xloc_kf': np.float32,
-        'yloc_kf': np.float32,
-        'lane_kf': 'category',
-        'speed_kf': np.float32,
-        'acceleration': np.float32,
-        'length_sm': np.float32,
-        'width_sm': np.float32,
-        'type_mostav': 'category',
-        'run_index': np.int8
-    }
-    df = pd.read_csv(uploaded_file, dtype=dtypes)
+def load_data(filepath):
+    df = pd.read_csv(filepath)
+    # Filter for Run 1 only
+    df = df[df['run_index'] == 1]
+    # Sort by time and vehicle id for analysis
+    df = df.sort_values(['time', 'id']).reset_index(drop=True)
     return df
 
-# --- Streamlit UI ---
-st.title("TGSIM I-90/I-94 Trajectory Data Visualization & Analysis")
+# 2. Compute key traffic flow metrics
+def compute_metrics(df):
+    # Headways: time difference between consecutive vehicles at the same lane
+    df['time_diff'] = df.groupby('lane_kf')['time'].diff()
+    df['space_diff'] = df.groupby('lane_kf')['xloc_kf'].diff()
+    
+    # Speeds are already in speed_kf (in some units)
+    
+    # Space-mean speed per lane per time window (aggregated mean)
+    space_mean_speed = df.groupby(['lane_kf', 'time'])['speed_kf'].mean().reset_index(name='space_mean_speed')
+    
+    # Flow: count vehicles per lane per time unit
+    flow = df.groupby(['lane_kf', 'time']).size().reset_index(name='flow')
+    
+    # Density: number of vehicles per spatial distance unit (approximate)
+    density = df.groupby(['lane_kf', 'xloc_kf']).size().reset_index(name='density')
+    
+    return df, space_mean_speed, flow, density
 
-uploaded_file = st.file_uploader("Upload TGSIM Trajectory CSV", type=["csv"])
-if uploaded_file:
-    df = load_data(uploaded_file)
+# 3. Streamlit app UI and plotting
+def main():
+    st.title("TGSIM Trajectory Visualization and Traffic Flow Analysis")
 
-    # Lane selection menu
-    lanes = sorted(df['lane_kf'].unique())
-    selected_lane = st.selectbox("Select Lane", lanes)
-    filtered_df = df[df['lane_kf'] == selected_lane]
+    # File uploader or path input
+    filepath = st.text_input("Enter path to TGSIM dataset CSV file:", "tgsim_run1.csv")
+    
+    if filepath:
+        with st.spinner("Loading data..."):
+            df = load_data(filepath)
 
-    # Vehicle selection (optional, scalable for large data)
-    vehicle_ids = filtered_df['id'].unique()
-    selected_vehicles = st.multiselect("Vehicles to display", vehicle_ids, default=vehicle_ids[:10])
+        # Lane selection dropdown
+        lanes = sorted(df['lane_kf'].unique())
+        selected_lane = st.selectbox("Select lane:", lanes)
+        
+        # Filter data by selected lane for visualization
+        lane_df = df[df['lane_kf'] == selected_lane]
+        
+        # Time range slider for zooming in time dimension
+        time_min, time_max = int(lane_df['time'].min()), int(lane_df['time'].max())
+        time_range = st.slider("Select time range to zoom:", time_min, time_max, (time_min, time_max))
+        lane_df = lane_df[(lane_df['time'] >= time_range[0]) & (lane_df['time'] <= time_range[1])]
+        
+        # Plot trajectories: xloc (space) vs time, color by vehicle id
+        fig_traj = px.scatter(lane_df, x='xloc_kf', y='time', color='id',
+                              labels={'xloc_kf': 'Position on Road (xloc_kf)', 'time': 'Time'},
+                              title=f"Trajectories of Vehicles in Lane {selected_lane}")
+        fig_traj.update_yaxes(autorange='reversed')  # Show early time at top
+        
+        st.plotly_chart(fig_traj, use_container_width=True)
+        
+        # Compute metrics
+        df_metrics, space_mean_speed, flow, density = compute_metrics(df)
 
-    plot_df = filtered_df[filtered_df['id'].isin(selected_vehicles)]
+        st.subheader("Traffic Flow Analysis")
 
-    # Region / zoom selection
-    min_time, max_time = plot_df['time'].min(), plot_df['time'].max()
-    time_range = st.slider("Time Range", float(min_time), float(max_time), (float(min_time), float(max_time)))
-    plot_df = plot_df[(plot_df['time'] >= time_range) & (plot_df['time'] <= time_range[1])]
+        # Plot Headways distribution (time headways)
+        headways = df_metrics['time_diff'].dropna()
+        fig_headways = px.histogram(headways, nbins=50, labels={'value': 'Time Headway (s)'},
+                                   title="Distribution of Time Headways")
+        st.plotly_chart(fig_headways, use_container_width=True)
 
-    # --- Trajectory Visualization (Plotly for interactive zoom) ---
-    fig = px.line(
-        plot_df,
-        x="xloc_kf", y="yloc_kf", color="id",
-        labels={"xloc_kf": "X Position", "yloc_kf": "Y Position"},
-        title="Vehicle Trajectories (Zoom and Pan enabled)"
-    )
-    st.plotly_chart(fig, use_container_width=True)
+        # Plot Speeds distribution
+        fig_speeds = px.histogram(df['speed_kf'], nbins=50, labels={'value': 'Speed (units)'},
+                                  title="Distribution of Speeds")
+        st.plotly_chart(fig_speeds, use_container_width=True)
 
-    # --- Traffic Flow Analysis ---
-    st.header("Traffic Flow Metrics")
+        # Plot Space-mean Speeds over time for selected lane
+        sm_speed_lane = space_mean_speed[space_mean_speed['lane_kf'] == selected_lane]
+        fig_sms = px.line(sm_speed_lane, x='time', y='space_mean_speed',
+                          title="Space-Mean Speed Over Time")
+        st.plotly_chart(fig_sms, use_container_width=True)
 
-    # Time and Space Headways
-    st.subheader("Headways")
-    plot_headways = plot_df.sort_values(['lane_kf', 'time', 'xloc_kf'])
-    headways_time = plot_headways.groupby('lane_kf').apply(
-        lambda g: g.sort_values('time').groupby('id')['time'].diff().dropna()
-    ).explode().dropna()
-    headways_space = plot_headways.groupby('lane_kf').apply(
-        lambda g: g.sort_values('xloc_kf').groupby('id')['xloc_kf'].diff().dropna()
-    ).explode().dropna()
-    fig_ht = plt.figure()
-    plt.hist(headways_time, bins=30, color='skyblue')
-    plt.xlabel('Temporal Headway (s)')
-    plt.ylabel('Count')
-    plt.title('Distribution of Temporal Headways')
-    st.pyplot(fig_ht)
+        # Plot Flow over time for selected lane
+        flow_lane = flow[flow['lane_kf'] == selected_lane]
+        fig_flow = px.line(flow_lane, x='time', y='flow', title="Flow Over Time (vehicles/time)")
+        st.plotly_chart(fig_flow, use_container_width=True)
 
-    fig_hs = plt.figure()
-    plt.hist(headways_space, bins=30, color='orange')
-    plt.xlabel('Spatial Headway (m)')
-    plt.ylabel('Count')
-    plt.title('Distribution of Spatial Headways')
-    st.pyplot(fig_hs)
+        # Plot Density along the road for selected lane (spatial density)
+        density_lane = density[density['lane_kf'] == selected_lane]
+        fig_density = px.scatter(density_lane, x='xloc_kf', y='density',
+                                 title="Density Along Road (vehicles per position)",
+                                 labels={'xloc_kf': 'Position on Road', 'density': 'Density'})
+        st.plotly_chart(fig_density, use_container_width=True)
 
-    # Individual Speeds
-    st.subheader("Speeds")
-    fig_spd = px.histogram(plot_df, x="speed_kf", nbins=40, title="Distribution of Individual Vehicle Speeds")
-    st.plotly_chart(fig_spd)
+        st.subheader("Speed-Density-Flow Relationships")
 
-    # Space-Mean Speed (by segments, e.g. per 10s window)
-    st.subheader("Space-Mean Speeds")
-    plot_df['segment'] = pd.cut(plot_df['time'], bins=np.arange(min_time, max_time+10, 10))
-    sms = plot_df.groupby('segment')['speed_kf'].mean()
-    fig_sms = px.line(x=sms.index.astype(str), y=sms.values, labels={'x':'Time Segment', 'y':'Space-Mean Speed'}, title="Space-Mean Speeds Over Time")
-    st.plotly_chart(fig_sms)
+        # Merge mean speed, density and flow approximations by lane and spatial/time bins if needed (simplified)
+        # This is a complex analysis; here, display illustrative scatter plots:
+        fig_sd = px.scatter(density_lane, x='xloc_kf', y='density', title='Density along road')
+        st.plotly_chart(fig_sd, use_container_width=True)
 
-    # Flow (vehicles per time)
-    st.subheader("Flow")
-    flow = plot_df.groupby('time')['id'].nunique()
-    fig_flow = px.line(x=flow.index, y=flow.values, labels={'x':'Time (s)', 'y':'Flow (veh/s)'}, title="Traffic Flow Over Time")
-    st.plotly_chart(fig_flow)
+        # Future extensions: compute and plot fundamental diagrams (flow vs density, speed vs density)
 
-    # Density (vehicles per distance)
-    st.subheader("Density")
-    # Example: per 100m segment along xloc_kf
-    plot_df['distance_bin'] = pd.cut(plot_df['xloc_kf'], bins=np.arange(plot_df['xloc_kf'].min(), plot_df['xloc_kf'].max()+100, 100))
-    density = plot_df.groupby('distance_bin')['id'].nunique()
-    fig_density = px.bar(x=density.index.astype(str), y=density.values, labels={'x':'Position Bin', 'y':'Density (veh/100m)'}, title="Density Distribution")
-    st.plotly_chart(fig_density)
-
-    # Speed-Density-Flow Relationships
-    st.subheader("Speed-Density-Flow Relationships")
-    sum_df = pd.DataFrame({
-        'space_mean_speed': sms.values,
-        'flow': flow.reindex(sms.index, fill_value=0).values,
-        'density': density.reindex(sms.index, fill_value=0).values
-    })
-    fig_sdf = px.scatter(sum_df, x="density", y="space_mean_speed", size="flow", title="Speed-Density-Flow Scatter")
-    st.plotly_chart(fig_sdf)
-
-    st.write("Explore and interpret the metrics above to understand traffic behavior for selected lanes and vehicles.")
-
-else:
-    st.info("Please upload the TGSIM CSV file to begin.")
-
+if __name__ == "__main__":
+    main()
