@@ -27,11 +27,11 @@ This project is an interactive Streamlit app for exploring and analyzing the Thi
 
 ## Installation
 
-### Install required Python packages using pip (Can skip if you have already installed these packages):
+#### Install required Python packages using pip (Can skip if you have already installed these packages):
 
 pip install streamlit pandas plotly numpy
 
-### In the terminal again, cd into where your files are:
+#### In the terminal again, cd into where your files are:
 
 cd "C:\Users\HaoDC\Documents\6. Fall 2025\CEE 416\MP1\Version 2"
 
